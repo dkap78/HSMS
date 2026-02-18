@@ -60,3 +60,6 @@ packages
 # Visual Source Safe
 *.vssscc
 *.vspscc
+Documents/sp.sql
+Documents/db.sql
+Documents/README.txt

@@ -188,3 +188,433 @@ CREATE INDEX idx_audit_entity ON audit_logs(entity_name, entity_id);
 CREATE INDEX idx_flat_occupancy_flat ON flat_occupancy(flat_id);
 CREATE INDEX idx_account_tx_date ON account_transactions(transaction_date);
 
+
+-- STORED PROCEDURES
+CREATE OR REPLACE FUNCTION sp_users_insert(
+    p_email TEXT,
+    p_password_hash TEXT,
+    p_first_name TEXT,
+    p_last_name TEXT,
+    p_phone TEXT
+)
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_id UUID := uuid_generate_v4();
+BEGIN
+    INSERT INTO users (
+        id, email, password_hash, first_name, last_name, phone,
+        is_active, created_at, updated_at
+    )
+    VALUES (
+        v_id, p_email, p_password_hash, p_first_name, p_last_name, p_phone,
+        TRUE, NOW(), NOW()
+    );
+
+    RETURN v_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_users_get_by_id(p_id UUID)
+RETURNS SETOF users
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM users
+    WHERE id = p_id
+      AND is_active = TRUE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_users_get_by_email(p_email TEXT)
+RETURNS SETOF users
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM users
+    WHERE email = p_email
+      AND is_active = TRUE;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE sp_users_update(
+    p_id UUID,
+    p_first_name TEXT,
+    p_last_name TEXT,
+    p_phone TEXT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE users
+    SET first_name = p_first_name,
+        last_name  = p_last_name,
+        phone      = p_phone,
+        updated_at = NOW()
+    WHERE id = p_id;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE sp_users_soft_delete(p_id UUID)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE users
+    SET is_active = FALSE,
+        updated_at = NOW()
+    WHERE id = p_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_flats_insert(
+    p_flat_number TEXT,
+    p_wing TEXT,
+    p_floor INT
+)
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_id UUID := uuid_generate_v4();
+BEGIN
+    INSERT INTO flats (
+        id, flat_number, wing, floor,
+        is_active, created_at, updated_at
+    )
+    VALUES (
+        v_id, p_flat_number, p_wing, p_floor,
+        TRUE, NOW(), NOW()
+    );
+
+    RETURN v_id;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE sp_flat_occupancy_insert(
+    p_flat_id UUID,
+    p_owner_user_id UUID,
+    p_tenant_user_id UUID,
+    p_occupancy_type occupancy_type,
+    p_start_date DATE
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE flat_occupancy
+    SET is_active = FALSE
+    WHERE flat_id = p_flat_id;
+
+    INSERT INTO flat_occupancy (
+        id, flat_id, owner_user_id, tenant_user_id,
+        occupancy_type, start_date, is_active
+    )
+    VALUES (
+        uuid_generate_v4(),
+        p_flat_id, p_owner_user_id, p_tenant_user_id,
+        p_occupancy_type, p_start_date, TRUE
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_flat_directory()
+RETURNS TABLE (
+    flat_id UUID,
+    flat_number TEXT,
+    wing TEXT,
+    floor INT,
+    occupancy_type occupancy_type,
+    owner_id UUID,
+    tenant_id UUID
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        f.id, f.flat_number, f.wing, f.floor,
+        fo.occupancy_type,
+        fo.owner_user_id,
+        fo.tenant_user_id
+    FROM flats f
+    JOIN flat_occupancy fo ON fo.flat_id = f.id
+    WHERE f.is_active = TRUE
+      AND fo.is_active = TRUE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_notices_insert(
+    p_title TEXT,
+    p_content TEXT,
+    p_created_by UUID,
+    p_expire_date DATE
+)
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_id UUID := uuid_generate_v4();
+BEGIN
+    INSERT INTO notices (
+        id, title, content, created_by_user_id,
+        publish_date, expire_date, is_active,
+        created_at, updated_at
+    )
+    VALUES (
+        v_id, p_title, p_content, p_created_by,
+        CURRENT_DATE, p_expire_date, TRUE,
+        NOW(), NOW()
+    );
+
+    RETURN v_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_notices_list()
+RETURNS SETOF notices
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM notices
+    WHERE is_active = TRUE
+      AND (expire_date IS NULL OR expire_date >= CURRENT_DATE)
+    ORDER BY publish_date DESC;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_payments_insert(
+    p_user_id UUID,
+    p_flat_id UUID,
+    p_amount NUMERIC,
+    p_payment_type payment_type,
+    p_transaction_ref TEXT,
+    p_payment_date DATE,
+    p_entered_by UUID
+)
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_id UUID := uuid_generate_v4();
+BEGIN
+    INSERT INTO payments (
+        id, user_id, flat_id, amount,
+        payment_type, transaction_ref,
+        payment_date, status,
+        entered_by_user_id,
+        created_at, updated_at
+    )
+    VALUES (
+        v_id, p_user_id, p_flat_id, p_amount,
+        p_payment_type, p_transaction_ref,
+        p_payment_date, 'Pending',
+        p_entered_by,
+        NOW(), NOW()
+    );
+
+    RETURN v_id;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE sp_payments_approve(
+    p_payment_id UUID,
+    p_admin_id UUID
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE payments
+    SET status = 'Approved',
+        approved_by_user_id = p_admin_id,
+        approval_date = NOW(),
+        updated_at = NOW()
+    WHERE id = p_payment_id;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE sp_payments_reject(
+    p_payment_id UUID,
+    p_admin_id UUID,
+    p_remarks TEXT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE payments
+    SET status = 'Rejected',
+        approved_by_user_id = p_admin_id,
+        approval_date = NOW(),
+        remarks = p_remarks,
+        updated_at = NOW()
+    WHERE id = p_payment_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_accounts_insert(
+    p_name TEXT,
+    p_type account_type
+)
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_id UUID := uuid_generate_v4();
+BEGIN
+    INSERT INTO accounts (id, name, type, is_active)
+    VALUES (v_id, p_name, p_type, TRUE);
+
+    RETURN v_id;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE sp_account_transactions_insert(
+    p_account_id UUID,
+    p_amount NUMERIC,
+    p_transaction_date DATE,
+    p_reference TEXT,
+    p_description TEXT,
+    p_created_by UUID
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO account_transactions (
+        id, account_id, amount,
+        transaction_date, reference,
+        description, created_by_user_id,
+        created_at, updated_at
+    )
+    VALUES (
+        uuid_generate_v4(),
+        p_account_id, p_amount,
+        p_transaction_date, p_reference,
+        p_description, p_created_by,
+        NOW(), NOW()
+    );
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE sp_audit_insert(
+    p_entity_name TEXT,
+    p_entity_id UUID,
+    p_action audit_action,
+    p_changed_by UUID,
+    p_old_values JSONB,
+    p_new_values JSONB
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO audit_logs (
+        id, entity_name, entity_id, action,
+        changed_by_user_id, changed_at,
+        old_values, new_values
+    )
+    VALUES (
+        uuid_generate_v4(),
+        p_entity_name, p_entity_id, p_action,
+        p_changed_by, NOW(),
+        p_old_values, p_new_values
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_users_search(p_term TEXT)
+RETURNS SETOF users AS $$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM users
+    WHERE is_active = TRUE
+      AND (email ILIKE '%' || p_term || '%'
+       OR first_name ILIKE '%' || p_term || '%'
+       OR last_name ILIKE '%' || p_term || '%');
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION sp_audit_list(
+    p_entity TEXT,
+    p_from DATE,
+    p_to DATE
+)
+RETURNS SETOF audit_logs
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM audit_logs
+    WHERE entity_name = p_entity
+      AND changed_at BETWEEN p_from AND p_to
+    ORDER BY changed_at DESC;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_user_permissions(p_user_id UUID)
+RETURNS TABLE(permission TEXT)
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT rp.permission_name
+    FROM user_roles ur
+    JOIN role_permissions rp ON ur.role_id = rp.role_id
+    WHERE ur.user_id = p_user_id;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION sp_roles_insert(p_name TEXT)
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_id UUID := uuid_generate_v4();
+BEGIN
+    INSERT INTO roles(id, name)
+    VALUES (v_id, p_name);
+
+    RETURN v_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_roles_list()
+RETURNS SETOF roles
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY SELECT * FROM roles ORDER BY name;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION sp_user_permissions(p_user_id UUID)
+RETURNS TABLE(permission TEXT)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT rp.permission_name
+    FROM user_roles ur
+    JOIN role_permissions rp ON ur.role_id = rp.role_id
+    WHERE ur.user_id = p_user_id;
+END;
+$$;
+
+
+CREATE OR REPLACE FUNCTION sp_payments_get_by_id(p_id UUID)
+RETURNS SETOF payments
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT *
+    FROM payments
+    WHERE id = p_id;
+END;
+$$;
+
+
